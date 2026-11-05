@@ -1,0 +1,119 @@
+name: Build My Limbo ARM64
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Download source
+        uses: actions/checkout@v4
+
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            "platforms;android-29" \
+            "build-tools;29.0.3" \
+            "ndk;23.2.8568313"
+
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/23.2.8568313" >> "$GITHUB_ENV"
+
+      - name: Install Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '6.5.1'
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential make gcc g++ \
+            autoconf automake libtool libtool-bin \
+            libltdl-dev pkg-config flex bison \
+            gettext texinfo rsync patch \
+            python3 python-is-python3 \
+            curl xz-utils
+
+      - name: Download QEMU and libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          J="$GITHUB_WORKSPACE/limbo-android-lib/src/main/jni"
+          cd "$J"
+
+          curl -fL https://download.qemu.org/qemu-5.1.0.tar.xz -o /tmp/qemu.tar.xz
+          tar -xf /tmp/qemu.tar.xz
+          mv qemu-5.1.0 qemu
+
+          curl -fL https://ftp.gnome.org/pub/GNOME/sources/glib/2.56/glib-2.56.1.tar.xz -o /tmp/glib.tar.xz
+          tar -xf /tmp/glib.tar.xz
+          mv glib-2.56.1 glib
+
+          curl -fL https://sourceware.org/pub/libffi/libffi-3.3.tar.gz -o /tmp/libffi.tar.gz
+          tar -xzf /tmp/libffi.tar.gz
+          mv libffi-3.3 libffi
+
+          curl -fL https://www.cairographics.org/releases/pixman-0.40.0.tar.gz -o /tmp/pixman.tar.gz
+          tar -xzf /tmp/pixman.tar.gz
+          mv pixman-0.40.0 pixman
+
+          curl -fL https://www.libsdl.org/release/SDL2-2.0.8.tar.gz -o /tmp/sdl.tar.gz
+          tar -xzf /tmp/sdl.tar.gz
+          mv SDL2-2.0.8 SDL2
+
+      - name: Apply Limbo patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          J="$GITHUB_WORKSPACE/limbo-android-lib/src/main/jni"
+          patch -d "$J/qemu" -p1 < "$J/patches/qemu-5.1.0.patch"
+          patch -d "$J/glib" -p1 < "$J/patches/glib-2.56.1.patch"
+          patch -d "$J/SDL2" -p1 < "$J/patches/sdl2-2.0.8.patch"
+
+      - name: Build ARM64 QEMU
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          J="$GITHUB_WORKSPACE/limbo-android-lib/src/main/jni"
+
+          export PATH="$ANDROID_NDK_HOME:$PATH"
+          export NDK_ROOT="$ANDROID_NDK_HOME"
+          export NDK_MODULE_PATH="$ANDROID_NDK_HOME/sources/"
+          export USE_QEMU_VERSION=5.1.0
+          export BUILD_HOST=arm64-v8a
+          export BUILD_GUEST=aarch64-softmmu
+
+          sed -i '/^NDK_ROOT[[:space:]]*=/d' \
+            "$J/android-config/android-limbo-config.mak"
+
+          make -C "$J/qemu/roms" bios seavgabios
+          make -C "$J" limbo
+
+      - name: Build Android APK
+        run: |
+          gradle :limbo-android-arm:assembleRelease --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: My-Limbo-ARM64
+          path: limbo-android-arm/build/outputs/apk/release/*.apk
+          if-no-files-found: error
